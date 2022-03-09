@@ -1,0 +1,317 @@
+---
+title: "Predicting the quality of white wine"
+author: "Uta Pfennig"
+date: "3/9/2022"
+output: 
+   pdf_document:
+    latex_engine: xelatex
+    number_sections: yes
+   html_document: 
+     number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r initial, results='hide', warning=FALSE, message=FALSE, echo=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(stringr)) install.packages("stringr", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(yaml)
+library(knitr)
+
+## Set number of significant digits
+options(digits = 4) 
+```
+
+
+# Introduction 
+
+This project focuses on predicting human wine preferences based on physiochemical components which were identified during wine analyses. Modeling wine preferences will generate useful insights which can be utilized to improve marketing strategies as well as wine production. 
+
+## Objectives and approach
+This project addresses the questions: (1) "Can wine quality be predicted by physiochemical ingredients?" and (2) "Which ingredients have the highest impact on perceived white wine quality?". 
+
+To answer these questions, the project is structured into 3 steps: <br>
+* Step 1: Data exploration: Explore and visualize the data to get an overview and understand how the data is structured <br>
+* Step 2: Modeling: Apply various algorithms to predict wine quality. The following models were applied: kNN model, classification tree and random forest.<br>
+* Step 3: Model evaluation: Evaluate the performance of each model using the true values contained in the test set. Since not all physiochemical properties are equally important for wine quality, the variable importance for predictors will be calculated.
+
+
+## Data set
+There are 2 data sets available from the UCI machine learning repository - one related to white wine and one for red wine. Since the project is focused on white wine. Only the data set containing white wine data has been downloaded and analysed. The data set contain 11 physicochemical and 1 sensory variables.
+
+```{r, echo=TRUE}
+## Download file for white wine from UCI and remove temporary file
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv"
+tmp_filename <- tempfile()
+download.file(url, tmp_filename)
+winequality <- read.csv(tmp_filename, sep =';')
+file.remove(tmp_filename)
+```
+
+The variables below are regared as input variables based on physicochemical tests:
+   1 - fixed acidity <br>
+   2 - volatile acidity <br>
+   3 - citric acid <br>
+   4 - residual sugarm <br>
+   5 - chlorides <br>
+   6 - free sulfur dioxide <br>
+   7 - total sulfur dioxide <br>
+   8 - density <br>
+   9 - pH <br>
+   10 - sulphates <br>
+   11 - alcohol 
+ 
+As output variable, one variable based on sensory data is included in the data set: 
+   12 - quality (score between 0 and 10)
+
+Before splitting the data into train and test sets, a basic data check was conducted. The imported data set encompasses 13 variables as outlined above and contains 4898 data records.  
+```{r, echo=FALSE}
+dim(winequality)
+```
+
+All physiochecmical properties are stored as numeric values in the data frame and the quality score as integer as shown below. 
+```{r, echo=FALSE}
+str(winequality)
+```
+
+There are no N/A values in the data set and thus, no data cleaning related to N/A values is required. 
+```{r, echo=TRUE}
+sum(is.na(winequality))
+```
+
+The table below lists the first 3 rows of the data set. 
+```{r, echo=FALSE}
+head(winequality,3)
+```
+
+
+# Methods and analysis 
+
+## Data exploration 
+In order to formulate hypothesis related to the project questions, the data set was analysed in more depth. 
+
+As starting point, a summary of each variable is provided in the overview below. The summary provides insights on the mean, median as well as the distribution of each variable. 
+```{r, descriptive_summary, echo=FALSE}
+summary(winequality)
+```
+
+The quality of the white wine was rated on a scale between 0 and 10. According to the summary chart, on average the wine quality is 5.878 (mean) with a minimum of 3 and a maximum of 9. 
+
+The histogram visually illustrates the distribution of wine quality across the scale. 
+
+```{r, Distribution of quality across data set 1, echo=FALSE}
+summary(winequality$quality)
+winequality %>% 
+  ggplot(aes(quality)) + 
+  geom_histogram() +
+  ggtitle("Number of wine samples per quality rating")
+```
+
+According to the boxplot, the majority of white wine samples were rated with a score of 5 or 6. There are very few data records for the quality score 3,4 and 9. 
+ 
+```{r, Distribution of quality across data set 2, echo=FALSE}
+winequality %>% 
+  ggplot(aes(y=quality)) + 
+  geom_boxplot()
+```
+
+To be able to predict wine quality, the quality score will be converted into a 3-class-outcome consisting of the values "1-low" (quality <=4), "2-medium" (quality in (5,6)) and "3-high" (quality > 6). 
+```{r, categorize_quality, echo=TRUE}
+winequality <- winequality %>% mutate(quality_cat = factor(case_when(
+  quality %in% c(3,4) ~ "1-low",
+  quality %in% c(5,6) ~ "2-medium",
+  quality > 6 ~ "3-high"))) %>% 
+  select(-quality)
+```
+
+
+Is it possible to visually identify possible physiochemical properties having an impact on the wine quality and to formulate a hypothesis? To answer the question, for each ingredient the distribution per quality category is displayed in boxplots. 
+
+Based on these plots, it seems that alcohol, free sulfur dioxide as well as volatile acidity may have an impact on the wine quality. <br>
+H1 - The higher the alcohol, the higher the perceived wine quality <br>
+H2 - Low free sulfur dioxide result in low wine quality <br>
+H3 - Low volatile acidity result in low wine quality 
+
+Different machine learning algorithms will be used in the later section to verify it. 
+
+```{r, echo=FALSE}
+winequality %>% gather(ingredients, percentage, -quality_cat) %>%
+  ggplot(aes(quality_cat, percentage, fill = quality_cat)) +
+  geom_boxplot() +
+  facet_wrap(~ingredients, scales = "free")
+```
+
+
+
+## Modeling 
+
+The downloaded and transformed data set is split into 2 data sets: <br>
+(1) training data set (representing 80% of the data and used to train model) and <br>
+(2) testing data set (representing 20% of the data and used to validate the model performance). 
+
+```{r, split_data, echo=TRUE}
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = winequality$quality_cat, times = 1, p = 0.2, list = FALSE)
+train_set <- winequality[-test_index,]
+test_set <- winequality[test_index,]
+```
+
+### K-nearest Neighbor 
+
+As a starting point, wine quality was predicted using the K-nearest neighbor model. In this model the distance between each observation in the training set and each observation in the test set is computed. Wine quality has been predicted with an accuracy of 0.7388.
+
+```{r, knn_model, echo=TRUE}
+train_knn <- train(quality_cat ~ ., method = "knn", data = train_set)
+y_hat_knn <- predict(train_knn, test_set, type = "raw")
+accuracy_knn <- confusionMatrix(y_hat_knn, test_set$quality_cat)$overall[["Accuracy"]]
+accuracy_knn
+```
+
+```{r, echo=FALSE}
+quality_results <- tibble(method = "Default kNN model", Accuracy = accuracy_knn)
+```
+
+
+Accuracy is highest with knn = 9 as illustrated in the chart below.
+
+```{r, plot, echo=FALSE}
+ggplot(train_knn, highlight= TRUE)
+```
+
+The flexibility of the estimates can be controlled with the parameter k. Large ks result in smoother estimates, while smaller ks result in more flexible but wiggly estimates. 
+
+The default values of k can be changed by using the tuneGrid parameter. To optimize the kNN model for predicting wine quality, 14 different k values between 9 and 50 were included in the model. This means that 14 versions of kNN were fitted to 25 bootstrapped samples resulting in 350 kNN models.   
+
+The best performing k value is 42.
+
+```{r, knn_optimized_1, echo=TRUE}
+train_knn_2 <- train(quality_cat ~ ., method = "knn", 
+                   data = train_set,
+                   tuneGrid = data.frame(k = seq(9, 50, 3)))
+train_knn_2$bestTune
+```
+
+The accuracy of the cross-validation applying the different k-values (neighbor) is illustrated in the chart below. 
+
+```{r, echo=FALSE}
+ggplot(train_knn_2, highlight= TRUE)
+```
+
+
+The best performing k value is used to predict wine quality. The tuning improved slightly the accuracy of the kNN model to 0.749.
+
+```{r, knn_optimized_2, echo=TRUE}
+y_hat_knn_2 <- predict(train_knn_2, test_set, type = "raw")
+accuracy_knn_2 <- confusionMatrix(y_hat_knn_2, test_set$quality_cat)$overall[["Accuracy"]]
+accuracy_knn_2
+```
+
+
+```{r, quality_results, echo=FALSE}
+quality_results <- bind_rows(quality_results,
+                             tibble(method="Optimized kNN model (k=42)", Accuracy = accuracy_knn_2))
+quality_results %>% knitr::kable()
+```
+
+
+### Classification and regression tree (CART)
+
+An alternative to kNN are classification trees which are used for predicting categorical outcomes. Classification trees are decision trees, which partition the data. Each node represents a test on a particular feature and each leaf represents the decision which was taken.
+
+Classification trees are very useful and can be easily interpreted. However, the model can easily over-train. The accuracy has only slighted improved to 0.7714. 
+
+```{r, rpart, echo=TRUE}
+train_rpart <- train(quality_cat ~ ., method = "rpart", data = train_set)
+y_hat_rpart <- predict(train_rpart, test_set, type = "raw")
+accuracy_rpart <- confusionMatrix(y_hat_rpart, test_set$quality_cat)$overall[["Accuracy"]]
+accuracy_rpart
+```
+
+
+```{r, echo=FALSE}
+quality_results <- bind_rows(quality_results,
+                             tibble(method="Classification tree", Accuracy = accuracy_rpart))
+```
+
+
+The decision tree outlining relevant predictors are illustrated below. Alcohol and volatile acidity seem to be relevant predictors. 
+
+```{r, decision tree, echo=FALSE}
+plot(train_rpart$finalModel, margin=0.1)
+text(train_rpart$finalModel, cex=0.75)
+```
+
+
+Alcohol, density and chlorides are the three most important variables. This means that H1 is confirmed. But there is no support for H2 and H3. 
+
+```{r, variable_importance, echo=TRUE}
+varImp(train_rpart)
+```
+
+
+### Random forest 
+
+Random forest is a very versatile machine learning algorithm which addresses the shortcomings of decision trees. By averaging multiple decision trees, the algorithm reduces instability caused by noisy data. 
+
+With random forest, the prediction algorithm performed best, achieving an accuracy of 0.8469.
+
+```{r, random_forest, echo=TRUE}
+train_rf <- randomForest(quality_cat ~ ., data = train_set)
+accuracy_rf <- confusionMatrix(predict(train_rf, test_set),
+                test_set$quality_cat)$overall["Accuracy"]
+accuracy_rf
+```
+
+```{r, echo=FALSE}
+quality_results <- bind_rows(quality_results,
+                             tibble(method="Random forest", Accuracy = accuracy_rf))
+```
+
+
+Random forest reconfirmed that alcohol and density are the two most important variables. However, chlorides were listed within the top 5 variables. The least important physiochemical properties are citric acid and fixed acidity. 
+
+```{r, variable_importance_rf, echo=TRUE}
+varImpPlot(train_rf)
+```
+
+
+# Results
+
+Different models have been fitted to predict white wine quality based on physiochemical properties as outlined in the results table below. Random forest performed best as prediction model. 
+
+```{r, results, echo=FALSE}
+quality_results %>% knitr::kable()
+```
+
+The models confirmed that physiochemical properties can be used to predict the quality of white wine. 
+
+The exploratory data analysis suggested that alcohol, sulfur dioxide and volatile acidity might be important variables to predict wine quality. However, only alcohol was confirmed. 
+
+
+# Conclusion 
+
+The results of wine quality prediction could be improved by using tuning parameters for random forest (nodesize, mtry, ntree) and by running multiple models on the training set at once (ensemble). 
+
+Outliniers were not explicitly considered in this project. 
+
+Data analysis can be further enhanced by adding further output variables.  
+
+
+# References
+Irizzary,R., 2018 “Introduction to Data Science”, https://rafalab.github.io/dsbook/
+
+
